@@ -1,4 +1,4 @@
-import { ReactNode } from "react";
+import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import {
@@ -11,7 +11,7 @@ import {
   Sparkles,
   Twitter,
   Wand2,
-  LucideIcon,
+  type LucideIcon,
   LogOut,
   User as UserIcon,
 } from "lucide-react";
@@ -64,7 +64,7 @@ function FeatureCard({
   copy: string;
 }) {
   return (
-    <article className="liquid-glass rounded-3xl p-5 text-white/80">
+    <article className="liquid-glass glass-card p-5 text-white/80">
       <IconBubble>
         <Icon size={16} strokeWidth={1.7} />
       </IconBubble>
@@ -224,7 +224,7 @@ export function HomePage() {
           </article>
 
           <div className="relative z-10 mt-auto">
-            <div className="liquid-glass rounded-[2.5rem] p-4">
+            <div className="liquid-glass glass-shell">
               <div className="grid grid-cols-2 gap-4">
                 <FeatureCard
                   icon={Wand2}
@@ -238,7 +238,7 @@ export function HomePage() {
                 />
               </div>
 
-              <article className="liquid-glass mt-4 flex items-center gap-4 rounded-3xl p-4">
+              <article className="liquid-glass glass-card mt-4 flex items-center gap-4 p-4">
                 <div className="h-16 w-24 overflow-hidden rounded-2xl bg-white/10">
                   <img
                     src={heroFlowers}
