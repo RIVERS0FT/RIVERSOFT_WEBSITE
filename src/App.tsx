@@ -11,12 +11,11 @@ import {
   Wand2,
   type LucideIcon,
 } from "lucide-react";
-import heroFlowersFallback from "@/assets/hero-flowers.svg";
+import heroFlowers from "@/assets/hero-flowers.png";
 
 const backgroundVideo =
   "https://d8j0ntlcm91z4.cloudfront.net/user_38xzZboKViGWJOttwIXH07lWA1P/hf_20260315_073750_51473149-4350-4920-ae24-c8214286f323.mp4";
 
-const heroFlowersPreferred = "/src/assets/hero-flowers.png";
 const socialLinks = [
   { label: "Twitter", icon: Twitter },
   { label: "LinkedIn", icon: Linkedin },
@@ -215,13 +214,9 @@ export default function App() {
               <article className="liquid-glass mt-4 flex items-center gap-4 rounded-3xl p-4">
                 <div className="h-16 w-24 overflow-hidden rounded-2xl bg-white/10">
                   <img
-                    src={heroFlowersPreferred}
+                    src={heroFlowers}
                     alt="Grayscale floral sculpture thumbnail"
                     className="h-full w-full object-cover"
-                    onError={(event) => {
-                      event.currentTarget.onerror = null;
-                      event.currentTarget.src = heroFlowersFallback;
-                    }}
                   />
                 </div>
                 <div className="min-w-0 flex-1">
