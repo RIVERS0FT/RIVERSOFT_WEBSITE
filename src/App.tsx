@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import {
   ArrowRight,
   BookOpen,
@@ -8,6 +9,7 @@ import {
   Sparkles,
   Twitter,
   Wand2,
+  type LucideIcon,
 } from "lucide-react";
 import heroFlowersFallback from "@/assets/hero-flowers.svg";
 
@@ -41,7 +43,7 @@ function LogoMark({ size = 32 }: { size?: number }) {
   );
 }
 
-function IconBubble({ children }: { children: React.ReactNode }) {
+function IconBubble({ children }: { children: ReactNode }) {
   return (
     <span className="flex h-8 w-8 items-center justify-center rounded-full bg-white/10">
       {children}
@@ -54,7 +56,7 @@ function FeatureCard({
   title,
   copy,
 }: {
-  icon: typeof Wand2;
+  icon: LucideIcon;
   title: string;
   copy: string;
 }) {
