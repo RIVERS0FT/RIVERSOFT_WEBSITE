@@ -274,7 +274,7 @@ export function HomePage() {
             </div>
 
             {user ? (
-              <div className="liquid-glass flex h-11 items-center gap-3 rounded-full pl-2 pr-3">
+              <div className="liquid-glass flex h-11 items-center gap-3 rounded-full px-2">
                 <div className="flex items-center gap-2">
                   <span className="flex h-8 w-8 items-center justify-center rounded-full bg-white/20">
                     <UserIcon size={15} />
