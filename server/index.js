@@ -153,6 +153,24 @@ function isSqliteUniqueConstraintError(error) {
   return error?.code === 'SQLITE_CONSTRAINT' || String(error?.message || '').includes('SQLITE_CONSTRAINT');
 }
 
+function getDatabaseSaveErrorStatus(error) {
+  const message = String(error?.message || '');
+
+  if (isSqliteUniqueConstraintError(error)) {
+    return 'conflict';
+  }
+
+  if (
+    message.includes('no such column') ||
+    message.includes('no such table') ||
+    message.includes('ON CONFLICT clause does not match')
+  ) {
+    return 'db_schema_outdated';
+  }
+
+  return 'db_save_failed';
+}
+
 function sanitizeOptionalString(value, maxLength = 200) {
   if (value === undefined || value === null) return null;
   const text = String(value).trim();
@@ -305,14 +323,20 @@ async function getUserProfile(userId) {
 }
 
 async function upsertVerifiedPlatformAccount(userId, platform, account) {
+  const updateResult = await db.run(
+    `UPDATE platform_accounts
+     SET platform_user_id = ?, account_name = ?, profile_url = ?, updated_at = CURRENT_TIMESTAMP
+     WHERE user_id = ? AND platform = ?`,
+    [account.platformUserId, account.accountName, account.profileUrl, userId, platform]
+  );
+
+  if (updateResult.changes && updateResult.changes > 0) {
+    return;
+  }
+
   await db.run(
     `INSERT INTO platform_accounts (user_id, platform, platform_user_id, account_name, profile_url, updated_at)
-     VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-     ON CONFLICT(user_id, platform)
-     DO UPDATE SET platform_user_id = excluded.platform_user_id,
-                   account_name = excluded.account_name,
-                   profile_url = excluded.profile_url,
-                   updated_at = CURRENT_TIMESTAMP`,
+     VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
     [userId, platform, account.platformUserId, account.accountName, account.profileUrl]
   );
 }
@@ -627,11 +651,20 @@ app.get('/api/auth/steam/callback', async (req, res) => {
 
     const profileUrl = `https://steamcommunity.com/profiles/${steamId}`;
 
-    await upsertVerifiedPlatformAccount(savedState.userId, 'steam', {
-      platformUserId: steamId,
-      accountName: steamId,
-      profileUrl,
-    });
+    try {
+      await upsertVerifiedPlatformAccount(savedState.userId, 'steam', {
+        platformUserId: steamId,
+        accountName: steamId,
+        profileUrl,
+      });
+    } catch (error) {
+      console.error('Steam binding save failed:', {
+        code: error?.code,
+        message: error?.message,
+        stack: error?.stack,
+      });
+      return errorRedirect(getDatabaseSaveErrorStatus(error));
+    }
 
     res.redirect(buildClientProfileRedirect(req, 'steam', 'linked'));
   } catch (error) {
