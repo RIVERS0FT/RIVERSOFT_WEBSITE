@@ -357,7 +357,7 @@ export function HomePage() {
           </article>
 
           <div className="relative z-10 mt-auto w-full">
-            <section className="liquid-glass glass-shell rounded-[2.5rem] p-4">
+            <section className="liquid-glass glass-shell">
               <div className="grid grid-cols-2 gap-[var(--glass-gap)]">
                 <FeatureCard
                   icon={Wand2}
