@@ -45,9 +45,9 @@ const homeCopy = {
     cta: "View Our Games",
     tags: ["Game Development", "Original Worlds", "Interactive Entertainment"],
     studioEyebrow: "Game Development Studio",
-    footerPrefix: "We create",
+    footerStart: "We create ",
     footerHighlight: "original games",
-    footerMiddle: "with immersive",
+    footerMiddle: " with immersive ",
     footerEnding: "player experiences.",
     studioSignature: "RIVERSOFT STUDIO",
     login: "Login",
@@ -78,7 +78,7 @@ const homeCopy = {
     cta: "查看游戏作品",
     tags: ["游戏开发", "原创世界", "互动娱乐"],
     studioEyebrow: "游戏开发工作室",
-    footerPrefix: "我们打造",
+    footerStart: "我们打造",
     footerHighlight: "原创游戏",
     footerMiddle: "，提供沉浸式",
     footerEnding: "玩家体验。",
@@ -239,7 +239,9 @@ export function HomePage() {
                 {t.studioEyebrow}
               </p>
               <p className="mt-3 font-display text-2xl font-medium tracking-[-0.04em] text-white/80 lg:text-3xl">
-                {t.footerPrefix} <span className="font-serif italic text-white">{t.footerHighlight}</span> {t.footerMiddle}{' '}
+                {t.footerStart}
+                <span className="font-serif italic text-white">{t.footerHighlight}</span>
+                {t.footerMiddle}
                 <span className="font-serif italic text-white/80">{t.footerEnding}</span>
               </p>
               <div className="mt-5 flex items-center justify-center gap-4">
