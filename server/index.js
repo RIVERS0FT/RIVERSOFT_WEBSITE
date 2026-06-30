@@ -11,10 +11,16 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const dbPath = process.env.DATABASE_PATH || join(__dirname, 'database.sqlite');
 
 const app = express();
+app.set('trust proxy', 1);
+
 const PORT = process.env.PORT || 3001;
 const SESSION_COOKIE_NAME = process.env.SESSION_COOKIE_NAME || 'riversoft_sid';
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24; // 24 hours
+const STEAM_OPENID_STATE_TTL_MS = 1000 * 60 * 10; // 10 minutes
 const COOKIE_SECURE = process.env.COOKIE_SECURE === 'true';
+const STEAM_OPENID_ENDPOINT = 'https://steamcommunity.com/openid/login';
+const STEAM_OPENID_IDENTIFIER = 'http://specs.openid.net/auth/2.0/identifier_select';
+const DEFAULT_CLIENT_ORIGIN = 'http://localhost:5173';
 const allowedOrigins = (process.env.CLIENT_ORIGIN || 'http://localhost:5173,http://127.0.0.1:5173,http://riversoft.top,https://riversoft.top,http://www.riversoft.top,https://www.riversoft.top')
   .split(',')
   .map((origin) => origin.trim())
@@ -84,8 +90,85 @@ function buildClearSessionCookie() {
   return buildSessionCookie('', 0);
 }
 
+function normalizeOrigin(origin) {
+  return String(origin || '').trim().replace(/\/+$/, '');
+}
+
+function isLocalOrigin(origin) {
+  return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
+}
+
+function getRequestOrigin(req) {
+  return normalizeOrigin(`${req.protocol}://${req.get('host')}`);
+}
+
+function getServerOrigin(req) {
+  return normalizeOrigin(process.env.SERVER_PUBLIC_ORIGIN || getRequestOrigin(req));
+}
+
+function getClientOrigin(req) {
+  if (process.env.CLIENT_PUBLIC_ORIGIN) {
+    return normalizeOrigin(process.env.CLIENT_PUBLIC_ORIGIN);
+  }
+
+  const requestOrigin = getRequestOrigin(req);
+  if (!isLocalOrigin(requestOrigin)) {
+    return requestOrigin;
+  }
+
+  return normalizeOrigin(allowedOrigins[0] || DEFAULT_CLIENT_ORIGIN);
+}
+
+function buildClientProfileRedirect(req, steamStatus) {
+  const profileUrl = process.env.CLIENT_PROFILE_URL || `${getClientOrigin(req)}/profile`;
+  const url = new URL(profileUrl);
+  url.searchParams.set('steam', steamStatus);
+  return url.toString();
+}
+
+function getQueryValue(query, key) {
+  const value = query[key];
+  if (Array.isArray(value)) return value[0];
+  if (value === undefined || value === null) return '';
+  return String(value);
+}
+
+function extractSteamIdFromClaimedId(claimedId) {
+  const match = String(claimedId || '').match(/^https?:\/\/steamcommunity\.com\/openid\/id\/(\d+)$/);
+  return match ? match[1] : null;
+}
+
+async function verifySteamOpenId(query) {
+  const params = new URLSearchParams();
+
+  for (const [key, value] of Object.entries(query)) {
+    if (!key.startsWith('openid.')) continue;
+    const normalizedValue = Array.isArray(value) ? value[0] : value;
+    if (normalizedValue !== undefined && normalizedValue !== null) {
+      params.set(key, String(normalizedValue));
+    }
+  }
+
+  params.set('openid.mode', 'check_authentication');
+
+  const response = await fetch(STEAM_OPENID_ENDPOINT, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: params,
+  });
+
+  const text = await response.text();
+  return response.ok && /(^|\n)is_valid\s*:\s*true(\r?\n|$)/.test(text);
+}
+
 async function deleteExpiredSessions() {
   await db.run('DELETE FROM sessions WHERE expires_at <= ?', [Date.now()]);
+}
+
+async function deleteExpiredSteamOpenIdStates() {
+  await db.run('DELETE FROM steam_openid_states WHERE expires_at <= ?', [Date.now()]);
 }
 
 async function createSession(userId) {
@@ -186,9 +269,20 @@ async function initDb() {
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS steam_openid_states (
+      state TEXT PRIMARY KEY,
+      user_id INTEGER NOT NULL,
+      session_id TEXT NOT NULL,
+      expires_at INTEGER NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    );
+
     CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
     CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
     CREATE INDEX IF NOT EXISTS idx_platform_accounts_user_id ON platform_accounts(user_id);
+    CREATE INDEX IF NOT EXISTS idx_steam_openid_states_expires_at ON steam_openid_states(expires_at);
   `);
 
   await ensureUserColumns();
@@ -385,35 +479,95 @@ app.put('/api/profile/password', authenticateSession, async (req, res) => {
   }
 });
 
-app.put('/api/profile/platforms/:platform', authenticateSession, async (req, res) => {
-  const platform = normalizePlatform(req.params.platform);
-  const accountName = sanitizeOptionalString(req.body.accountName, 80);
-  const profileUrl = sanitizeOptionalString(req.body.profileUrl, 500);
+app.get('/api/auth/steam', authenticateSession, async (req, res) => {
+  try {
+    await deleteExpiredSteamOpenIdStates();
 
-  if (!supportedPlatforms.has(platform)) {
-    return res.status(400).json({ message: 'Unsupported platform' });
+    const state = crypto.randomBytes(24).toString('hex');
+    const expiresAt = Date.now() + STEAM_OPENID_STATE_TTL_MS;
+
+    await db.run(
+      'INSERT INTO steam_openid_states (state, user_id, session_id, expires_at) VALUES (?, ?, ?, ?)',
+      [state, req.user.id, req.sessionId, expiresAt]
+    );
+
+    const serverOrigin = getServerOrigin(req);
+    const returnTo = `${serverOrigin}/api/auth/steam/callback?state=${encodeURIComponent(state)}`;
+    const realm = `${serverOrigin}/`;
+
+    const params = new URLSearchParams({
+      'openid.ns': 'http://specs.openid.net/auth/2.0',
+      'openid.mode': 'checkid_setup',
+      'openid.return_to': returnTo,
+      'openid.realm': realm,
+      'openid.identity': STEAM_OPENID_IDENTIFIER,
+      'openid.claimed_id': STEAM_OPENID_IDENTIFIER,
+    });
+
+    res.redirect(`${STEAM_OPENID_ENDPOINT}?${params.toString()}`);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Server error starting Steam binding' });
   }
+});
 
-  if (!accountName) {
-    return res.status(400).json({ message: 'Platform account name is required' });
+app.get('/api/auth/steam/callback', authenticateSession, async (req, res) => {
+  const state = sanitizeOptionalString(getQueryValue(req.query, 'state'), 128);
+  const errorRedirect = () => res.redirect(buildClientProfileRedirect(req, 'error'));
+
+  if (!state) {
+    return errorRedirect();
   }
 
   try {
+    await deleteExpiredSteamOpenIdStates();
+
+    const savedState = await db.get(
+      `SELECT state
+       FROM steam_openid_states
+       WHERE state = ? AND user_id = ? AND session_id = ? AND expires_at > ?`,
+      [state, req.user.id, req.sessionId, Date.now()]
+    );
+
+    await db.run('DELETE FROM steam_openid_states WHERE state = ?', [state]);
+
+    if (!savedState) {
+      return errorRedirect();
+    }
+
+    if (getQueryValue(req.query, 'openid.mode') !== 'id_res') {
+      return errorRedirect();
+    }
+
+    const isValid = await verifySteamOpenId(req.query);
+    if (!isValid) {
+      return errorRedirect();
+    }
+
+    const claimedId = getQueryValue(req.query, 'openid.claimed_id');
+    const identity = getQueryValue(req.query, 'openid.identity');
+    const steamId = extractSteamIdFromClaimedId(claimedId);
+
+    if (!steamId || identity !== claimedId) {
+      return errorRedirect();
+    }
+
+    const profileUrl = `https://steamcommunity.com/profiles/${steamId}`;
+
     await db.run(
       `INSERT INTO platform_accounts (user_id, platform, account_name, profile_url, updated_at)
-       VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+       VALUES (?, 'steam', ?, ?, CURRENT_TIMESTAMP)
        ON CONFLICT(user_id, platform)
        DO UPDATE SET account_name = excluded.account_name,
                      profile_url = excluded.profile_url,
                      updated_at = CURRENT_TIMESTAMP`,
-      [req.user.id, platform, accountName, profileUrl]
+      [req.user.id, steamId, profileUrl]
     );
 
-    const user = await getUserProfile(req.user.id);
-    res.json({ user });
+    res.redirect(buildClientProfileRedirect(req, 'linked'));
   } catch (error) {
     console.error(error);
-    res.status(500).json({ message: 'Server error linking platform account' });
+    errorRedirect();
   }
 });
 
