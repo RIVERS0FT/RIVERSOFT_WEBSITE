@@ -16,7 +16,7 @@ app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3001;
 const SESSION_COOKIE_NAME = process.env.SESSION_COOKIE_NAME || 'riversoft_sid';
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24; // 24 hours
-const STEAM_OPENID_STATE_TTL_MS = 1000 * 60 * 10; // 10 minutes
+const PLATFORM_AUTH_STATE_TTL_MS = 1000 * 60 * 10; // 10 minutes
 const COOKIE_SECURE = process.env.COOKIE_SECURE === 'true';
 const STEAM_OPENID_ENDPOINT = 'https://steamcommunity.com/openid/login';
 const STEAM_OPENID_IDENTIFIER = 'http://specs.openid.net/auth/2.0/identifier_select';
@@ -39,6 +39,63 @@ const supportedPlatforms = new Set([
   'discord',
   'twitch',
 ]);
+
+const oauthProviders = {
+  discord: {
+    platform: 'discord',
+    displayName: 'Discord',
+    clientId: process.env.DISCORD_CLIENT_ID,
+    clientSecret: process.env.DISCORD_CLIENT_SECRET,
+    authorizeUrl: 'https://discord.com/oauth2/authorize',
+    tokenUrl: 'https://discord.com/api/oauth2/token',
+    scope: 'identify',
+    async fetchAccount(accessToken) {
+      const profile = await fetchJson('https://discord.com/api/users/@me', {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      }, 'Failed to fetch Discord profile');
+
+      if (!profile.id) {
+        throw new Error('Discord profile response is missing id');
+      }
+
+      return {
+        platformUserId: String(profile.id),
+        accountName: String(profile.global_name || profile.username || profile.id).slice(0, 80),
+        profileUrl: `https://discord.com/users/${profile.id}`,
+      };
+    },
+  },
+  twitch: {
+    platform: 'twitch',
+    displayName: 'Twitch',
+    clientId: process.env.TWITCH_CLIENT_ID,
+    clientSecret: process.env.TWITCH_CLIENT_SECRET,
+    authorizeUrl: 'https://id.twitch.tv/oauth2/authorize',
+    tokenUrl: 'https://id.twitch.tv/oauth2/token',
+    scope: '',
+    async fetchAccount(accessToken, provider) {
+      const response = await fetchJson('https://api.twitch.tv/helix/users', {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Client-Id': provider.clientId,
+        },
+      }, 'Failed to fetch Twitch profile');
+      const profile = Array.isArray(response.data) ? response.data[0] : null;
+
+      if (!profile?.id) {
+        throw new Error('Twitch profile response is missing id');
+      }
+
+      return {
+        platformUserId: String(profile.id),
+        accountName: String(profile.display_name || profile.login || profile.id).slice(0, 80),
+        profileUrl: profile.login ? `https://www.twitch.tv/${profile.login}` : null,
+      };
+    },
+  },
+};
 
 app.use(cors({
   origin(origin, callback) {
@@ -119,10 +176,11 @@ function getClientOrigin(req) {
   return normalizeOrigin(allowedOrigins[0] || DEFAULT_CLIENT_ORIGIN);
 }
 
-function buildClientProfileRedirect(req, steamStatus) {
+function buildClientProfileRedirect(req, platform, status) {
   const profileUrl = process.env.CLIENT_PROFILE_URL || `${getClientOrigin(req)}/profile`;
   const url = new URL(profileUrl);
-  url.searchParams.set('steam', steamStatus);
+  url.searchParams.set('platform', platform);
+  url.searchParams.set('status', status);
   return url.toString();
 }
 
@@ -136,6 +194,32 @@ function getQueryValue(query, key) {
 function extractSteamIdFromClaimedId(claimedId) {
   const match = String(claimedId || '').match(/^https?:\/\/steamcommunity\.com\/openid\/id\/(\d+)$/);
   return match ? match[1] : null;
+}
+
+function isOAuthProviderConfigured(provider) {
+  return Boolean(provider?.clientId && provider?.clientSecret);
+}
+
+function isSqliteUniqueConstraintError(error) {
+  return error?.code === 'SQLITE_CONSTRAINT' || String(error?.message || '').includes('SQLITE_CONSTRAINT');
+}
+
+async function fetchJson(url, options, errorMessage) {
+  const response = await fetch(url, options);
+  const text = await response.text();
+  let data = null;
+
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = null;
+  }
+
+  if (!response.ok) {
+    throw new Error(`${errorMessage}: HTTP ${response.status}`);
+  }
+
+  return data;
 }
 
 async function verifySteamOpenId(query) {
@@ -163,12 +247,64 @@ async function verifySteamOpenId(query) {
   return response.ok && /(^|\n)is_valid\s*:\s*true(\r?\n|$)/.test(text);
 }
 
+async function exchangeOAuthCode(provider, code, redirectUri) {
+  const params = new URLSearchParams({
+    grant_type: 'authorization_code',
+    code,
+    redirect_uri: redirectUri,
+    client_id: provider.clientId,
+    client_secret: provider.clientSecret,
+  });
+
+  const token = await fetchJson(provider.tokenUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: params,
+  }, `Failed to exchange ${provider.displayName} OAuth code`);
+
+  if (!token?.access_token) {
+    throw new Error(`${provider.displayName} token response is missing access token`);
+  }
+
+  return token;
+}
+
 async function deleteExpiredSessions() {
   await db.run('DELETE FROM sessions WHERE expires_at <= ?', [Date.now()]);
 }
 
-async function deleteExpiredSteamOpenIdStates() {
-  await db.run('DELETE FROM steam_openid_states WHERE expires_at <= ?', [Date.now()]);
+async function deleteExpiredPlatformAuthStates() {
+  await db.run('DELETE FROM platform_auth_states WHERE expires_at <= ?', [Date.now()]);
+}
+
+async function createPlatformAuthState(platform, req, redirectUri) {
+  await deleteExpiredPlatformAuthStates();
+
+  const state = crypto.randomBytes(24).toString('hex');
+  const expiresAt = Date.now() + PLATFORM_AUTH_STATE_TTL_MS;
+
+  await db.run(
+    'INSERT INTO platform_auth_states (state, user_id, session_id, platform, redirect_uri, expires_at) VALUES (?, ?, ?, ?, ?, ?)',
+    [state, req.user.id, req.sessionId, platform, redirectUri, expiresAt]
+  );
+
+  return state;
+}
+
+async function consumePlatformAuthState(platform, state, req) {
+  await deleteExpiredPlatformAuthStates();
+
+  const savedState = await db.get(
+    `SELECT state, redirect_uri AS redirectUri
+     FROM platform_auth_states
+     WHERE state = ? AND platform = ? AND user_id = ? AND session_id = ? AND expires_at > ?`,
+    [state, platform, req.user.id, req.sessionId, Date.now()]
+  );
+
+  await db.run('DELETE FROM platform_auth_states WHERE state = ?', [state]);
+  return savedState;
 }
 
 async function createSession(userId) {
@@ -200,6 +336,24 @@ async function ensureUserColumns() {
   }
 }
 
+async function ensurePlatformAccountColumns() {
+  const columns = await db.all('PRAGMA table_info(platform_accounts)');
+  const columnNames = new Set(columns.map((column) => column.name));
+  const missingColumns = [
+    ['platform_user_id', 'TEXT'],
+  ].filter(([name]) => !columnNames.has(name));
+
+  for (const [name, type] of missingColumns) {
+    await db.exec(`ALTER TABLE platform_accounts ADD COLUMN ${name} ${type}`);
+  }
+
+  await db.run(
+    `UPDATE platform_accounts
+     SET platform_user_id = account_name
+     WHERE platform = 'steam' AND platform_user_id IS NULL AND account_name IS NOT NULL`
+  );
+}
+
 function sanitizeOptionalString(value, maxLength = 200) {
   if (value === undefined || value === null) return null;
   const text = String(value).trim();
@@ -220,7 +374,7 @@ async function getUserProfile(userId) {
   if (!user) return null;
 
   const platforms = await db.all(
-    `SELECT platform, account_name AS accountName, profile_url AS profileUrl, updated_at AS updatedAt
+    `SELECT platform, platform_user_id AS platformUserId, account_name AS accountName, profile_url AS profileUrl, updated_at AS updatedAt
      FROM platform_accounts
      WHERE user_id = ?
      ORDER BY platform ASC`,
@@ -228,6 +382,19 @@ async function getUserProfile(userId) {
   );
 
   return { ...user, platforms };
+}
+
+async function upsertVerifiedPlatformAccount(userId, platform, account) {
+  await db.run(
+    `INSERT INTO platform_accounts (user_id, platform, platform_user_id, account_name, profile_url, updated_at)
+     VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT(user_id, platform)
+     DO UPDATE SET platform_user_id = excluded.platform_user_id,
+                   account_name = excluded.account_name,
+                   profile_url = excluded.profile_url,
+                   updated_at = CURRENT_TIMESTAMP`,
+    [userId, platform, account.platformUserId, account.accountName, account.profileUrl]
+  );
 }
 
 // Initialize database
@@ -262,6 +429,7 @@ async function initDb() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL,
       platform TEXT NOT NULL,
+      platform_user_id TEXT,
       account_name TEXT NOT NULL,
       profile_url TEXT,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -269,10 +437,12 @@ async function initDb() {
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
 
-    CREATE TABLE IF NOT EXISTS steam_openid_states (
+    CREATE TABLE IF NOT EXISTS platform_auth_states (
       state TEXT PRIMARY KEY,
       user_id INTEGER NOT NULL,
       session_id TEXT NOT NULL,
+      platform TEXT NOT NULL,
+      redirect_uri TEXT,
       expires_at INTEGER NOT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
@@ -282,10 +452,12 @@ async function initDb() {
     CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
     CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
     CREATE INDEX IF NOT EXISTS idx_platform_accounts_user_id ON platform_accounts(user_id);
-    CREATE INDEX IF NOT EXISTS idx_steam_openid_states_expires_at ON steam_openid_states(expires_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_platform_accounts_platform_user_id ON platform_accounts(platform, platform_user_id) WHERE platform_user_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_platform_auth_states_expires_at ON platform_auth_states(expires_at);
   `);
 
   await ensureUserColumns();
+  await ensurePlatformAccountColumns();
   console.log('Database initialized');
 }
 
@@ -481,18 +653,10 @@ app.put('/api/profile/password', authenticateSession, async (req, res) => {
 
 app.get('/api/auth/steam', authenticateSession, async (req, res) => {
   try {
-    await deleteExpiredSteamOpenIdStates();
-
-    const state = crypto.randomBytes(24).toString('hex');
-    const expiresAt = Date.now() + STEAM_OPENID_STATE_TTL_MS;
-
-    await db.run(
-      'INSERT INTO steam_openid_states (state, user_id, session_id, expires_at) VALUES (?, ?, ?, ?)',
-      [state, req.user.id, req.sessionId, expiresAt]
-    );
-
     const serverOrigin = getServerOrigin(req);
-    const returnTo = `${serverOrigin}/api/auth/steam/callback?state=${encodeURIComponent(state)}`;
+    const callbackUrl = `${serverOrigin}/api/auth/steam/callback`;
+    const state = await createPlatformAuthState('steam', req, callbackUrl);
+    const returnTo = `${callbackUrl}?state=${encodeURIComponent(state)}`;
     const realm = `${serverOrigin}/`;
 
     const params = new URLSearchParams({
@@ -513,23 +677,14 @@ app.get('/api/auth/steam', authenticateSession, async (req, res) => {
 
 app.get('/api/auth/steam/callback', authenticateSession, async (req, res) => {
   const state = sanitizeOptionalString(getQueryValue(req.query, 'state'), 128);
-  const errorRedirect = () => res.redirect(buildClientProfileRedirect(req, 'error'));
+  const errorRedirect = (status = 'error') => res.redirect(buildClientProfileRedirect(req, 'steam', status));
 
   if (!state) {
     return errorRedirect();
   }
 
   try {
-    await deleteExpiredSteamOpenIdStates();
-
-    const savedState = await db.get(
-      `SELECT state
-       FROM steam_openid_states
-       WHERE state = ? AND user_id = ? AND session_id = ? AND expires_at > ?`,
-      [state, req.user.id, req.sessionId, Date.now()]
-    );
-
-    await db.run('DELETE FROM steam_openid_states WHERE state = ?', [state]);
+    const savedState = await consumePlatformAuthState('steam', state, req);
 
     if (!savedState) {
       return errorRedirect();
@@ -554,20 +709,87 @@ app.get('/api/auth/steam/callback', authenticateSession, async (req, res) => {
 
     const profileUrl = `https://steamcommunity.com/profiles/${steamId}`;
 
-    await db.run(
-      `INSERT INTO platform_accounts (user_id, platform, account_name, profile_url, updated_at)
-       VALUES (?, 'steam', ?, ?, CURRENT_TIMESTAMP)
-       ON CONFLICT(user_id, platform)
-       DO UPDATE SET account_name = excluded.account_name,
-                     profile_url = excluded.profile_url,
-                     updated_at = CURRENT_TIMESTAMP`,
-      [req.user.id, steamId, profileUrl]
-    );
+    await upsertVerifiedPlatformAccount(req.user.id, 'steam', {
+      platformUserId: steamId,
+      accountName: steamId,
+      profileUrl,
+    });
 
-    res.redirect(buildClientProfileRedirect(req, 'linked'));
+    res.redirect(buildClientProfileRedirect(req, 'steam', 'linked'));
   } catch (error) {
     console.error(error);
-    errorRedirect();
+    errorRedirect(isSqliteUniqueConstraintError(error) ? 'conflict' : 'error');
+  }
+});
+
+app.get('/api/auth/:platform', authenticateSession, async (req, res) => {
+  const platform = normalizePlatform(req.params.platform);
+  const provider = oauthProviders[platform];
+
+  if (!provider) {
+    return res.redirect(buildClientProfileRedirect(req, platform || 'unknown', 'unsupported'));
+  }
+
+  if (!isOAuthProviderConfigured(provider)) {
+    return res.redirect(buildClientProfileRedirect(req, platform, 'unconfigured'));
+  }
+
+  try {
+    const redirectUri = `${getServerOrigin(req)}/api/auth/${platform}/callback`;
+    const state = await createPlatformAuthState(platform, req, redirectUri);
+    const params = new URLSearchParams({
+      response_type: 'code',
+      client_id: provider.clientId,
+      redirect_uri: redirectUri,
+      state,
+    });
+
+    if (provider.scope) {
+      params.set('scope', provider.scope);
+    }
+
+    res.redirect(`${provider.authorizeUrl}?${params.toString()}`);
+  } catch (error) {
+    console.error(error);
+    res.redirect(buildClientProfileRedirect(req, platform, 'error'));
+  }
+});
+
+app.get('/api/auth/:platform/callback', authenticateSession, async (req, res) => {
+  const platform = normalizePlatform(req.params.platform);
+  const provider = oauthProviders[platform];
+  const state = sanitizeOptionalString(getQueryValue(req.query, 'state'), 128);
+  const code = sanitizeOptionalString(getQueryValue(req.query, 'code'), 2048);
+  const errorRedirect = (status = 'error') => res.redirect(buildClientProfileRedirect(req, platform || 'unknown', status));
+
+  if (!provider) {
+    return errorRedirect('unsupported');
+  }
+
+  if (!isOAuthProviderConfigured(provider)) {
+    return errorRedirect('unconfigured');
+  }
+
+  if (!state || !code) {
+    return errorRedirect();
+  }
+
+  try {
+    const savedState = await consumePlatformAuthState(platform, state, req);
+
+    if (!savedState?.redirectUri) {
+      return errorRedirect();
+    }
+
+    const token = await exchangeOAuthCode(provider, code, savedState.redirectUri);
+    const account = await provider.fetchAccount(token.access_token, provider);
+
+    await upsertVerifiedPlatformAccount(req.user.id, platform, account);
+
+    res.redirect(buildClientProfileRedirect(req, platform, 'linked'));
+  } catch (error) {
+    console.error(error);
+    errorRedirect(isSqliteUniqueConstraintError(error) ? 'conflict' : 'error');
   }
 });
 
