@@ -149,6 +149,7 @@ const profileCopy = {
       invalid_claim: "Steam returned an invalid account claim. Please try again.",
       db_schema_outdated: "The server database schema is outdated. Pull the latest code and restart the backend so migrations run.",
       db_save_failed: "The server could not save the Steam binding. Check backend logs for 'Steam binding save failed'.",
+      unexpected_callback_error: "The Steam callback hit an unexpected server error. Check backend logs for 'Steam binding callback failed'.",
       unconfigured: "This platform is not configured on the server yet.",
       unsupported: "This platform does not support RIVERSOFT binding yet.",
       error: "The server hit an unexpected error while saving the binding.",
@@ -200,6 +201,7 @@ const profileCopy = {
       invalid_claim: "Steam 返回的账号声明无效，请重试。",
       db_schema_outdated: "服务器数据库结构过旧，请拉取最新代码并重启后端，让迁移自动执行。",
       db_save_failed: "服务器无法保存 Steam 绑定，请查看后端日志里的 Steam binding save failed。",
+      unexpected_callback_error: "Steam 回调发生未知服务端错误，请查看后端日志里的 Steam binding callback failed。",
       unconfigured: "服务端尚未配置该平台绑定参数。",
       unsupported: "该平台暂未支持 RIVERSOFT 绑定。",
       error: "服务器保存绑定时发生异常。",
@@ -308,7 +310,8 @@ export function ProfilePage() {
       return;
     }
 
-    const reason = t.bindingReasons[status as keyof typeof t.bindingReasons] || t.bindingReasons.fallback;
+    const knownReason = t.bindingReasons[status as keyof typeof t.bindingReasons];
+    const reason = knownReason || `${t.bindingReasons.fallback} (${status})`;
     setMessage("");
     setError("");
     setToast({
