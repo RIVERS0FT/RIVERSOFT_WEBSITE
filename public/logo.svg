@@ -1,0 +1,8 @@
+<svg width="80" height="80" viewBox="0 0 80 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="80" height="80" rx="40" fill="white" fill-opacity="0.12"/>
+  <path d="M40 58V31" stroke="white" stroke-opacity="0.86" stroke-width="3" stroke-linecap="round"/>
+  <path d="M40 34C30 31 25 24 25 15C35 17 41 23 40 34Z" fill="white" fill-opacity="0.76"/>
+  <path d="M40 37C51 34 57 27 57 17C46 19 39 26 40 37Z" fill="white" fill-opacity="0.62"/>
+  <path d="M40 45C31 43 24 38 20 30C31 28 39 34 40 45Z" fill="white" fill-opacity="0.48"/>
+  <path d="M40 48C51 46 59 40 63 31C50 30 41 36 40 48Z" fill="white" fill-opacity="0.42"/>
+</svg>

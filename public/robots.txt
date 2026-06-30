@@ -1,0 +1,49 @@
+User-agent: *
+Allow: /
+Disallow: /api/
+
+User-agent: Googlebot
+Allow: /
+Disallow: /api/
+
+User-agent: Googlebot-Image
+Allow: /
+
+User-agent: Bingbot
+Allow: /
+Disallow: /api/
+
+User-agent: DuckDuckBot
+Allow: /
+Disallow: /api/
+
+User-agent: Baiduspider
+Allow: /
+Disallow: /api/
+
+User-agent: Sogou web spider
+Allow: /
+Disallow: /api/
+
+User-agent: 360Spider
+Allow: /
+Disallow: /api/
+
+User-agent: YandexBot
+Allow: /
+Disallow: /api/
+
+User-agent: Bytespider
+Allow: /
+Disallow: /api/
+
+User-agent: PetalBot
+Allow: /
+Disallow: /api/
+
+User-agent: Applebot
+Allow: /
+Disallow: /api/
+
+Sitemap: https://riversoft.top/sitemap.xml
+Host: riversoft.top
